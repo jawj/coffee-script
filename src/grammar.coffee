@@ -429,7 +429,7 @@ grammar =
 
   ForBody: [
     o 'FOR Range',                              -> source: new Value($2)
-    o 'ForStart ForSource',                     -> $2.own = $1.own; $2.name = $1[0]; $2.index = $1[1]; $2
+    o 'ForStart ForSource',                     -> $2.own = $1.own; $2.name = $1[0]; $2.index = $1[1]; $2.names = $1; $2
   ]
 
   ForStart: [
@@ -450,13 +450,21 @@ grammar =
   # of object comprehensions.
   ForVariables: [
     o 'ForValue',                               -> [$1]
-    o 'ForValue , ForValue',                    -> [$1, $3]
+    o 'ForVariables , ForValue',                -> $1.concat $3
   ]
+
+
+  ForInSourceList: [
+    o 'Expression , Expression',       -> [$1, $3]
+    o 'ForInSourceList , Expression',  -> $1.concat $3
+  ]
+  
 
   # The source of a comprehension is an array or object with an optional guard
   # clause. If it's an array comprehension, you can also choose to step through
   # in fixed-size increments.
   ForSource: [
+    o 'FORIN ForInSourceList',                          -> source: $2
     o 'FORIN Expression',                               -> source: $2
     o 'FOROF Expression',                               -> source: $2, object: yes
     o 'FORIN Expression WHEN Expression',               -> source: $2, guard: $4

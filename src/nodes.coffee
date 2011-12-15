@@ -1563,7 +1563,7 @@ exports.Parens = class Parens extends Base
 # you can map and filter in a single pass.
 exports.For = class For extends While
   constructor: (body, source) ->
-    {@source, @guard, @step, @name, @index} = source
+    {@source, @guard, @step, @name, @index, @names} = source
     @body    = Block.wrap [body]
     @own     = !!source.own
     @object  = !!source.object
@@ -1582,17 +1582,21 @@ exports.For = class For extends While
   # comprehensions. Some of the generated code can be shared in common, and
   # some cannot.
   compileNode: (o) ->
+    multiSource = @source instanceof Array
     body      = Block.wrap [@body]
     lastJumps = last(body.expressions)?.jumps()
     @returns  = no if lastJumps and lastJumps instanceof Return
     source    = if @range then @source.base else @source
     scope     = o.scope
     name      = @name  and @name.compile o, LEVEL_LIST
-    index     = @index and @index.compile o, LEVEL_LIST
+    index     = if multiSource
+      @names[@source.length]?.compile o, LEVEL_LIST
+    else
+      @index and @index.compile o, LEVEL_LIST
     scope.find(name,  immediate: yes) if name and not @pattern
     scope.find(index, immediate: yes) if index
     rvar      = scope.freeVariable 'results' if @returns
-    ivar      = (if @range then name else index) or scope.freeVariable 'i'
+    ivar = (if @range then name else index) or scope.freeVariable 'i'
     # the `_by` variable is created twice in `Range`s if we don't prevent it from being declared here
     stepvar   = scope.freeVariable "step" if @step and not @range
     name      = ivar if @pattern
@@ -1600,18 +1604,38 @@ exports.For = class For extends While
     guardPart = ''
     defPart   = ''
     idt1      = @tab + TAB
+    
     if @range
       forPart = source.compile merge(o, {index: ivar, @step})
     else
-      svar    = @source.compile o, LEVEL_LIST
-      if (name or @own) and not IDENTIFIER.test svar
-        defPart    = "#{@tab}#{ref = scope.freeVariable 'ref'} = #{svar};\n"
-        svar       = ref
+      svar = if multiSource
+        aSource.compile(o, LEVEL_LIST) for aSource in @source
+      else
+        @source.compile o, LEVEL_LIST
+      if (name or @own)
+        if not multiSource and not IDENTIFIER.test svar
+          defPart    = "#{@tab}#{ref = scope.freeVariable 'ref'} = #{svar};\n"
+          svar       = ref
+        else if multiSource
+          svar = for anSvar in svar
+            if IDENTIFIER.test anSvar
+              anSvar
+            else 
+              defPart += "#{@tab}#{ref = scope.freeVariable 'ref'} = #{anSvar};\n"
+              ref
       if name and not @pattern
-        namePart   = "#{name} = #{svar}[#{ivar}]"
+        namePart = if multiSource
+          names = (aName.compile(o, LEVEL_LIST) for aName in @names)
+          ("#{aName} = #{svar[i]}[#{ivar}]" for aName, i in names when i < svar.length).join('; ')
+        else 
+          "#{name} = #{svar}[#{ivar}]"
       unless @object
         lvar       = scope.freeVariable 'len'
-        forVarPart = "#{ivar} = 0, #{lvar} = #{svar}.length" + if @step then ", #{stepvar} = #{@step.compile(o, LEVEL_OP)}" else ''
+        maxLength = if multiSource
+          allLengths = ("#{anSvar}.length" for anSvar in svar).join(', ')
+          "Math.max(#{allLengths})"
+        else "#{svar}.length"
+        forVarPart = "#{ivar} = 0, #{lvar} = #{maxLength}" + if @step then ", #{stepvar} = #{@step.compile(o, LEVEL_OP)}" else ''
         stepPart   = if @step then "#{ivar} += #{stepvar}" else "#{ivar}++"
         forPart    = "#{forVarPart}; #{ivar} < #{lvar}; #{stepPart}"
     if @returns
@@ -1624,7 +1648,11 @@ exports.For = class For extends While
       else
         body = Block.wrap [new If @guard, body] if @guard
     if @pattern
-      body.expressions.unshift new Assign @name, new Literal "#{svar}[#{ivar}]"
+      if multiSource
+        for aName, i in @names
+          body.expressions.unshift new Assign aName, new Literal "#{svar[i]}[#{ivar}]"
+      else
+        body.expressions.unshift new Assign @name, new Literal "#{svar}[#{ivar}]"
     defPart     += @pluckDirectCall o, body
     varPart     = "\n#{idt1}#{namePart};" if namePart
     if @object
