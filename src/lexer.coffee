@@ -48,7 +48,7 @@ exports.Lexer = class Lexer
     # short-circuiting if any of them succeed. Their order determines precedence:
     # `@literalToken` is the fallback catch-all.
     i = 0
-    while @chunk = code.slice i
+    while @chunk = code[i..]
       i += @identifierToken() or
            @commentToken()    or
            @whitespaceToken() or
@@ -106,7 +106,7 @@ exports.Lexer = class Lexer
             @tokens.pop()
             id = '!' + id
 
-    if id in ['eval', 'arguments'].concat JS_FORBIDDEN
+    if id in JS_FORBIDDEN
       if forcedIdentifier
         tag = 'IDENTIFIER'
         id  = new String id
@@ -134,7 +134,13 @@ exports.Lexer = class Lexer
     return 0 unless match = NUMBER.exec @chunk
     number = match[0]
     lexedLength = number.length
-    if binaryLiteral = /0b([01]+)/.exec number
+    if nonStrictOctalLiteral = /^0\d+/.test number
+      dec = if /[89]/.test number then "\"#{number}\" " else ''
+      oct = if dec then '' else "\"#{number}\" "
+      @error "decimal literals #{dec}must not be prefixed with '0'; octal literals #{oct}must be prefixed with '0o'"
+    if octalLiteral = /0o([0-7]+)/i.exec number
+      number = (parseInt octalLiteral[1], 8).toString()
+    if binaryLiteral = /0b([01]+)/i.exec number
       number = (parseInt binaryLiteral[1], 2).toString()
     @token 'NUMBER', number
     lexedLength
@@ -149,11 +155,13 @@ exports.Lexer = class Lexer
       when '"'
         return 0 unless string = @balancedString @chunk, '"'
         if 0 < string.indexOf '#{', 1
-          @interpolateString string.slice 1, -1
+          @interpolateString string[1...-1]
         else
           @token 'STRING', @escapeLines string
       else
         return 0
+    if octalEsc = /^(?:\\.|[^\\])*\\[0-7]/.test string
+      @error "octal escape sequences #{string} are not allowed"
     @line += count string, '\n'
     string.length
 
@@ -178,14 +186,13 @@ exports.Lexer = class Lexer
     if here
       @token 'HERECOMMENT', @sanitizeHeredoc here,
         herecomment: true, indent: Array(@indent + 1).join(' ')
-      @token 'TERMINATOR', '\n'
     @line += count comment, '\n'
     comment.length
 
   # Matches JavaScript interpolated directly into the source via backticks.
   jsToken: ->
     return 0 unless @chunk.charAt(0) is '`' and match = JSTOKEN.exec @chunk
-    @token 'JS', (script = match[0]).slice 1, -1
+    @token 'JS', (script = match[0])[1...-1]
     script.length
 
   # Matches regular expression literals. Lexing regular expressions is difficult
@@ -335,7 +342,7 @@ exports.Lexer = class Lexer
         prev[0] = 'COMPOUND_ASSIGN'
         prev[1] += '='
         return value.length
-    if value is ';'             
+    if value is ';'
      @seenFor = no
      tag = 'TERMINATOR'
     else if value in MATH            then tag = 'MATH'
@@ -407,22 +414,26 @@ exports.Lexer = class Lexer
   # contents of the string. This method allows us to have strings within
   # interpolations within strings, ad infinitum.
   balancedString: (str, end) ->
+    continueCount = 0
     stack = [end]
     for i in [1...str.length]
+      if continueCount
+        --continueCount
+        continue
       switch letter = str.charAt i
         when '\\'
-          i++
+          ++continueCount
           continue
         when end
           stack.pop()
           unless stack.length
-            return str.slice 0, i + 1
+            return str[0..i]
           end = stack[stack.length - 1]
           continue
       if end is '}' and letter in ['"', "'"]
         stack.push end = letter
-      else if end is '}' and letter is '/' and match = (HEREGEX.exec(str.slice i) or REGEX.exec(str.slice i))
-        i += match[0].length - 1
+      else if end is '}' and letter is '/' and match = (HEREGEX.exec(str[i..]) or REGEX.exec(str[i..]))
+        continueCount += match[0].length - 1
       else if end is '}' and letter is '{'
         stack.push end = '}'
       else if end is '"' and prev is '#' and letter is '{'
@@ -448,10 +459,10 @@ exports.Lexer = class Lexer
         i += 1
         continue
       unless letter is '#' and str.charAt(i+1) is '{' and
-             (expr = @balancedString str.slice(i + 1), '}')
+             (expr = @balancedString str[i + 1..], '}')
         continue
-      tokens.push ['NEOSTRING', str.slice(pi, i)] if pi < i
-      inner = expr.slice(1, -1)
+      tokens.push ['NEOSTRING', str[pi...i]] if pi < i
+      inner = expr[1...-1]
       if inner.length
         nested = new Lexer().tokenize inner, line: @line, rewrite: off
         nested.pop()
@@ -463,7 +474,7 @@ exports.Lexer = class Lexer
           tokens.push ['TOKENS', nested]
       i += expr.length
       pi = i + 1
-    tokens.push ['NEOSTRING', str.slice pi] if i > pi < str.length
+    tokens.push ['NEOSTRING', str[pi..]] if i > pi < str.length
     return tokens if regex
     return @token 'STRING', '""' unless tokens.length
     tokens.unshift ['', ''] unless tokens[0][0] is 'NEOSTRING'
@@ -511,7 +522,7 @@ exports.Lexer = class Lexer
   unfinished: ->
     LINE_CONTINUER.test(@chunk) or
     @tag() in ['\\', '.', '?.', 'UNARY', 'MATH', '+', '-', 'SHIFT', 'RELATION'
-               'COMPARE', 'LOGIC', 'COMPOUND_ASSIGN', 'THROW', 'EXTENDS']
+               'COMPARE', 'LOGIC', 'THROW', 'EXTENDS']
 
   # Converts newlines for string literals.
   escapeLines: (str, heredoc) ->
@@ -524,9 +535,9 @@ exports.Lexer = class Lexer
       if contents in ['\n', quote] then contents else match
     body = body.replace /// #{quote} ///g, '\\$&'
     quote + @escapeLines(body, heredoc) + quote
-    
+
   # Throws a syntax error on the current `@line`.
-  error: (message) -> 
+  error: (message) ->
     throw SyntaxError "#{message} on line #{ @line + 1}"
 
 # Constants
@@ -565,13 +576,18 @@ RESERVED = [
   'case', 'default', 'function', 'var', 'void', 'with'
   'const', 'let', 'enum', 'export', 'import', 'native'
   '__hasProp', '__extends', '__slice', '__bind', '__indexOf'
+  'implements', 'interface', 'let', 'package',
+  'private', 'protected', 'public', 'static', 'yield'
 ]
+
+STRICT_PROSCRIBED = ['arguments', 'eval']
 
 # The superset of both JavaScript keywords and reserved words, none of which may
 # be used as identifiers or properties.
-JS_FORBIDDEN = JS_KEYWORDS.concat RESERVED
+JS_FORBIDDEN = JS_KEYWORDS.concat(RESERVED).concat(STRICT_PROSCRIBED)
 
-exports.RESERVED = RESERVED.concat(JS_KEYWORDS).concat(COFFEE_KEYWORDS)
+exports.RESERVED = RESERVED.concat(JS_KEYWORDS).concat(COFFEE_KEYWORDS).concat(STRICT_PROSCRIBED)
+exports.STRICT_PROSCRIBED = STRICT_PROSCRIBED
 
 # Token matching regexes.
 IDENTIFIER = /// ^
@@ -580,8 +596,9 @@ IDENTIFIER = /// ^
 ///
 
 NUMBER     = ///
-  ^ 0x[\da-f]+ |                              # hex
-  ^ 0b[01]+ |                              # binary
+  ^ 0x[\da-f]+ |              # hex
+  ^ 0b[01]+    |              # binary
+  ^ 0o[0-7]+   |              # octal
   ^ \d*\.?\d+ (?:e[+-]?\d+)?  # decimal
 ///i
 
